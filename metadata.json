@@ -1,0 +1,6 @@
+{
+  "name": "BlueFill PDF",
+  "description": "Simple mobile-friendly PDF filler to type text, draw signatures, add checkmarks, and download filled PDFs.",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}
