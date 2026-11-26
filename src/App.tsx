@@ -4,17 +4,21 @@ import * as pdfjsLib from 'pdfjs-dist';
 import type { PDFDocumentProxy, PDFPageProxy } from 'pdfjs-dist';
 import pdfWorkerUrl from 'pdfjs-dist/build/pdf.worker.min.mjs?url';
 import {
+  ArrowLeft,
   Check,
   CheckSquare,
+  ChevronRight,
   Download,
   FileText,
-  FileUp,
+  FolderOpen,
+  Loader2,
   PenTool,
   Type,
   ZoomIn,
   ZoomOut,
 } from 'lucide-react';
 import { AnnotationControlsBar } from './components/AnnotationControlsBar';
+import { FileTypeIcon } from './components/FileTypeIcon';
 import { PdfPageCanvas } from './components/PdfPageCanvas';
 import { SignatureModal } from './components/SignatureModal';
 import type {
@@ -26,7 +30,15 @@ import type {
   ToolMode,
 } from './types/pdf';
 import { createSamplePdf, exportFilledPdf } from './utils/pdfEngine';
+import {
+  detectDocumentKind,
+  loadRecentFiles,
+  saveRecentFile,
+  type DocumentKind,
+  type RecentFileEntry,
+} from './utils/recentFilesDb';
 import { savePdfToDevice } from './utils/savePdfFile';
+import { convertWordBytesToPdf, createSampleWordDocx } from './utils/wordToPdf';
 
 pdfjsLib.GlobalWorkerOptions.workerSrc = pdfWorkerUrl;
 
@@ -43,10 +55,14 @@ export default function App() {
 
   const [pdfBytes, setPdfBytes] = useState<Uint8Array | null>(null);
   const [fileName, setFileName] = useState<string>('');
+  const [sourceKind, setSourceKind] = useState<DocumentKind>('pdf');
   const [pdfDoc, setPdfDoc] = useState<PDFDocumentProxy | null>(null);
   const [pages, setPages] = useState<PDFPageProxy[]>([]);
   const [isLoadingPdf, setIsLoadingPdf] = useState(false);
+  const [isConvertingWord, setIsConvertingWord] = useState(false);
   const [errorMessage, setErrorMessage] = useState<string | null>(null);
+
+  const [recentFiles, setRecentFiles] = useState<RecentFileEntry[]>([]);
 
   const [activeTool, setActiveTool] = useState<ToolMode>('text');
   const [annotations, setAnnotations] = useState<PdfAnnotation[]>([]);
@@ -63,37 +79,45 @@ export default function App() {
   const [isDownloading, setIsDownloading] = useState(false);
   const [downloadSuccess, setDownloadSuccess] = useState(false);
 
-  const loadPdfFromBytes = useCallback(async (bytes: Uint8Array, name: string) => {
-    setIsLoadingPdf(true);
-    setErrorMessage(null);
-    setDownloadSuccess(false);
-
-    try {
-      // Pass a copy to pdf.js because its worker transfers/detaches the underlying ArrayBuffer
-      const loadingTask = pdfjsLib.getDocument({ data: bytes.slice() });
-      const doc = await loadingTask.promise;
-
-      const loadedPages: PDFPageProxy[] = [];
-      for (let i = 1; i <= doc.numPages; i++) {
-        const page = await doc.getPage(i);
-        loadedPages.push(page);
-      }
-
-      setPdfBytes(bytes);
-      setFileName(name);
-      setPdfDoc(doc);
-      setPages(loadedPages);
-      setAnnotations([]);
-      setSelectedId(null);
-      setFocusTextId(null);
-      setActiveTool('text');
-      setZoom(1);
-    } catch {
-      setErrorMessage('Could not open that file. Please choose a valid PDF.');
-    } finally {
-      setIsLoadingPdf(false);
-    }
+  useEffect(() => {
+    void loadRecentFiles().then(setRecentFiles);
   }, []);
+
+  const loadPdfFromBytes = useCallback(
+    async (bytes: Uint8Array, name: string, kind: DocumentKind) => {
+      setIsLoadingPdf(true);
+      setErrorMessage(null);
+      setDownloadSuccess(false);
+
+      try {
+        // Pass a copy to pdf.js because its worker transfers/detaches the underlying ArrayBuffer
+        const loadingTask = pdfjsLib.getDocument({ data: bytes.slice() });
+        const doc = await loadingTask.promise;
+
+        const loadedPages: PDFPageProxy[] = [];
+        for (let i = 1; i <= doc.numPages; i++) {
+          const page = await doc.getPage(i);
+          loadedPages.push(page);
+        }
+
+        setPdfBytes(bytes);
+        setFileName(name);
+        setSourceKind(kind);
+        setPdfDoc(doc);
+        setPages(loadedPages);
+        setAnnotations([]);
+        setSelectedId(null);
+        setFocusTextId(null);
+        setActiveTool('text');
+        setZoom(1);
+      } catch {
+        setErrorMessage('Could not open that file. Please choose a valid PDF or Word document.');
+      } finally {
+        setIsLoadingPdf(false);
+      }
+    },
+    []
+  );
 
   useEffect(() => {
     return () => {
@@ -101,29 +125,103 @@ export default function App() {
     };
   }, [pdfDoc]);
 
+  const openDocumentBytes = useCallback(
+    async (rawBytes: Uint8Array, originalName: string, persistRecent = true) => {
+      const kind = detectDocumentKind(originalName);
+      setErrorMessage(null);
+
+      if (kind === 'word') {
+        setIsConvertingWord(true);
+        try {
+          const convertedPdfBytes = await convertWordBytesToPdf(rawBytes);
+          if (persistRecent) {
+            const updated = await saveRecentFile({
+              name: originalName,
+              kind: 'word',
+              bytes: rawBytes,
+            });
+            if (updated.length > 0) setRecentFiles(updated);
+          }
+          await loadPdfFromBytes(convertedPdfBytes, originalName, 'word');
+        } catch (err) {
+          const msg =
+            err instanceof Error && err.message
+              ? err.message
+              : 'Could not convert this Word file to PDF.';
+          setErrorMessage(msg);
+        } finally {
+          setIsConvertingWord(false);
+        }
+        return;
+      }
+
+      if (persistRecent) {
+        const updated = await saveRecentFile({
+          name: originalName,
+          kind: 'pdf',
+          bytes: rawBytes,
+        });
+        if (updated.length > 0) setRecentFiles(updated);
+      }
+      await loadPdfFromBytes(rawBytes, originalName, 'pdf');
+    },
+    [loadPdfFromBytes]
+  );
+
   const handleFileSelected = async (e: React.ChangeEvent<HTMLInputElement>) => {
     const file = e.target.files?.[0];
     e.target.value = '';
     if (!file) return;
 
+    const lower = file.name.toLowerCase();
+    const isAllowed =
+      lower.endsWith('.pdf') || lower.endsWith('.docx') || lower.endsWith('.doc');
+    if (!isAllowed) {
+      setErrorMessage('Please choose a .pdf, .docx, or .doc file.');
+      return;
+    }
+
     const buffer = await file.arrayBuffer();
-    await loadPdfFromBytes(new Uint8Array(buffer), file.name);
+    await openDocumentBytes(new Uint8Array(buffer), file.name, true);
   };
 
-  const handleLoadSample = async () => {
+  const handleOpenRecent = async (entry: RecentFileEntry) => {
+    await openDocumentBytes(new Uint8Array(entry.bytes), entry.name, true);
+  };
+
+  const handleLoadSamplePdf = async () => {
     setIsLoadingPdf(true);
     setErrorMessage(null);
     try {
       const sampleBytes = await createSamplePdf();
-      await loadPdfFromBytes(sampleBytes, 'Sample_Application_Form.pdf');
+      await openDocumentBytes(sampleBytes, 'Sample_Application_Form.pdf', true);
     } catch {
       setErrorMessage('Could not create sample PDF.');
       setIsLoadingPdf(false);
     }
   };
 
-  const triggerUpload = () => {
+  const handleLoadSampleWord = async () => {
+    setErrorMessage(null);
+    try {
+      const sampleWordBytes = await createSampleWordDocx();
+      await openDocumentBytes(sampleWordBytes, 'Sample_Word_Form.docx', true);
+    } catch {
+      setErrorMessage('Could not open sample Word document.');
+    }
+  };
+
+  const triggerOpenFile = () => {
     fileInputRef.current?.click();
+  };
+
+  const handleBackToFiles = () => {
+    setPdfDoc(null);
+    setPages([]);
+    setPdfBytes(null);
+    setSelectedId(null);
+    setFocusTextId(null);
+    setAnnotations([]);
   };
 
   const getMostVisiblePageIndex = (): number => {
@@ -147,7 +245,6 @@ export default function App() {
   };
 
   const handleTapEmptyPage = (pageIndex: number, xPct: number, yPct: number) => {
-    // If an item is currently selected, first tap outside dismisses selection cleanly
     if (selectedId) {
       const current = annotations.find((a) => a.id === selectedId);
       if (current && current.type === 'text' && current.text.trim() === '') {
@@ -169,7 +266,6 @@ export default function App() {
         fontSize: 16,
         color: 'black',
       };
-      // flushSync ensures textarea mounts inside user tap event so mobile keyboard opens immediately
       flushSync(() => {
         setAnnotations((prev) => [...prev, newBox]);
         setSelectedId(id);
@@ -275,7 +371,7 @@ export default function App() {
 
     try {
       const filledBytes = await exportFilledPdf(pdfBytes, annotations);
-      const baseName = fileName.replace(/\.pdf$/i, '') || 'document';
+      const baseName = fileName.replace(/\.(pdf|docx|doc)$/i, '') || 'document';
       await savePdfToDevice(filledBytes, `filled_${baseName}.pdf`);
       setDownloadSuccess(true);
       setTimeout(() => setDownloadSuccess(false), 3500);
@@ -287,24 +383,43 @@ export default function App() {
   };
 
   const selectedAnnotation = annotations.find((a) => a.id === selectedId) ?? null;
+  const isBusy = isLoadingPdf || isConvertingWord;
+
+  const hasSamplePdfInRecent = recentFiles.some(
+    (f) => f.name === 'Sample_Application_Form.pdf' && f.kind === 'pdf'
+  );
+  const hasSampleWordInRecent = recentFiles.some(
+    (f) => f.name === 'Sample_Word_Form.docx' && f.kind === 'word'
+  );
 
   return (
     <div className="min-h-dvh flex flex-col bg-blue-50 text-blue-950">
       <input
         ref={fileInputRef}
         type="file"
-        accept="application/pdf,.pdf"
+        accept=".pdf,.docx,.doc,application/pdf,application/vnd.openxmlformats-officedocument.wordprocessingml.document,application/msword"
         onChange={handleFileSelected}
         className="hidden"
       />
 
       {/* Non-sticky Clean Top Header */}
       <header className="w-full bg-white border-b border-blue-100 pt-[env(safe-area-inset-top)]">
-        <div className="max-w-5xl mx-auto px-4 py-3 flex items-center justify-between gap-4">
+        <div className="max-w-5xl mx-auto px-4 py-3 flex items-center justify-between gap-3">
           <div className="flex items-center gap-3 min-w-0">
-            <div className="w-10 h-10 rounded-xl bg-blue-600 text-white flex items-center justify-center shrink-0">
-              <FileText className="w-5 h-5" />
-            </div>
+            {pdfDoc ? (
+              <button
+                type="button"
+                onClick={handleBackToFiles}
+                className="min-h-[48px] min-w-[48px] rounded-xl bg-blue-50 border border-blue-200 text-blue-900 flex items-center justify-center hover:bg-blue-100 active:scale-95 transition-transform shrink-0"
+                aria-label="Back to file list"
+              >
+                <ArrowLeft className="w-5 h-5" />
+              </button>
+            ) : (
+              <div className="w-10 h-10 rounded-xl bg-blue-600 text-white flex items-center justify-center shrink-0">
+                <FileText className="w-5 h-5" />
+              </div>
+            )}
             <span className="text-xl font-extrabold tracking-tight text-blue-950 whitespace-nowrap shrink-0">
               BlueFill PDF
             </span>
@@ -314,11 +429,12 @@ export default function App() {
             <div className="flex items-center gap-2 shrink-0">
               <button
                 type="button"
-                onClick={triggerUpload}
+                onClick={triggerOpenFile}
+                disabled={isBusy}
                 className="min-h-[48px] px-4 rounded-xl bg-blue-50 border border-blue-200 text-blue-900 text-base font-bold flex items-center gap-2 hover:bg-blue-100 active:scale-95 transition-transform whitespace-nowrap shrink-0"
               >
-                <FileUp className="w-5 h-5 text-blue-700" />
-                <span>Upload</span>
+                <FolderOpen className="w-5 h-5 text-blue-700" />
+                <span>Open File</span>
               </button>
 
               <button
@@ -339,6 +455,16 @@ export default function App() {
         </div>
       </header>
 
+      {/* Converting Word to PDF Status Banner */}
+      {isConvertingWord && (
+        <div className="max-w-3xl mx-auto w-full px-4 pt-4">
+          <div className="bg-blue-600 text-white rounded-2xl p-4 shadow-md flex items-center justify-center gap-3">
+            <Loader2 className="w-6 h-6 animate-spin shrink-0" />
+            <span className="text-lg font-bold">Converting Word to PDF...</span>
+          </div>
+        </div>
+      )}
+
       {/* Error Notice */}
       {errorMessage && (
         <div className="max-w-3xl mx-auto w-full px-4 pt-4">
@@ -357,82 +483,120 @@ export default function App() {
 
       {/* Main Content */}
       {!pdfDoc ? (
-        <main className="flex-1 flex items-center justify-center px-4 py-8 md:py-12">
-          <div className="w-full max-w-5xl grid grid-cols-1 lg:grid-cols-2 gap-8 items-stretch">
-            {/* Primary Upload Card */}
+        <main className="flex-1 flex items-center justify-center px-4 py-6 md:py-10">
+          <div className="w-full max-w-5xl grid grid-cols-1 lg:grid-cols-2 gap-6 items-stretch">
+            {/* Primary Open File Card */}
             <section className="bg-white rounded-3xl border border-blue-200 shadow-sm p-6 sm:p-8 flex flex-col justify-between gap-6">
               <div className="space-y-4">
                 <h1 className="text-3xl sm:text-4xl font-extrabold tracking-tight text-blue-950 text-balance">
-                  Fill and sign any PDF on your phone
+                  Fill and sign PDF or Word files on your phone
                 </h1>
                 <p className="text-lg text-blue-900/80 leading-relaxed">
-                  Upload a form, tap anywhere to type, add checkmarks, draw your signature with your finger, and save your filled PDF.
+                  Open a PDF or Word document, tap anywhere to type, add ticks, draw your signature, and save as a filled PDF.
                 </p>
               </div>
 
-              <div className="space-y-3">
+              <div className="space-y-4">
                 <button
                   type="button"
-                  onClick={triggerUpload}
-                  disabled={isLoadingPdf}
-                  className="w-full min-h-[64px] px-6 rounded-2xl bg-blue-600 text-white text-xl font-bold flex items-center justify-center gap-3 shadow-lg shadow-blue-600/20 hover:bg-blue-700 active:scale-[0.98] transition-transform"
+                  onClick={triggerOpenFile}
+                  disabled={isBusy}
+                  className="w-full min-h-[64px] px-6 rounded-2xl bg-blue-600 text-white text-xl font-bold flex items-center justify-center gap-3 shadow-lg shadow-blue-600/20 hover:bg-blue-700 active:scale-[0.98] transition-transform disabled:opacity-70"
                 >
-                  <FileUp className="w-7 h-7" />
-                  <span>{isLoadingPdf ? 'Opening PDF...' : 'Upload PDF'}</span>
+                  {isConvertingWord ? (
+                    <>
+                      <Loader2 className="w-7 h-7 animate-spin" />
+                      <span>Converting Word to PDF...</span>
+                    </>
+                  ) : (
+                    <>
+                      <FolderOpen className="w-7 h-7" />
+                      <span>{isLoadingPdf ? 'Opening File...' : 'Open File'}</span>
+                    </>
+                  )}
                 </button>
 
-                <button
-                  type="button"
-                  onClick={handleLoadSample}
-                  disabled={isLoadingPdf}
-                  className="w-full min-h-[54px] px-6 rounded-2xl bg-blue-50 border-2 border-blue-200 text-blue-900 text-lg font-bold flex items-center justify-center gap-2 hover:bg-blue-100 active:scale-[0.98] transition-transform"
-                >
-                  <FileText className="w-6 h-6 text-blue-700" />
-                  <span>Try Sample Form</span>
-                </button>
+                <p className="text-center text-base font-semibold text-blue-800">
+                  Supports .pdf, .docx, and .doc files
+                </p>
               </div>
             </section>
 
-            {/* Clear Step-by-Step Guide Card */}
-            <section className="bg-white rounded-3xl border border-blue-200 shadow-sm p-6 sm:p-8 flex flex-col justify-center gap-6">
-              <h2 className="text-2xl font-bold text-blue-950">How it works</h2>
+            {/* File List Card (Shows both PDF and W icons, opens all inside app) */}
+            <section className="bg-white rounded-3xl border border-blue-200 shadow-sm p-6 sm:p-8 flex flex-col gap-4">
+              <div className="flex items-center justify-between gap-2">
+                <h2 className="text-2xl font-bold text-blue-950">Files</h2>
+                <span className="text-base font-semibold text-blue-700">
+                  Tap to open
+                </span>
+              </div>
 
-              <div className="space-y-5">
-                <div className="flex items-start gap-4">
-                  <div className="w-12 h-12 rounded-2xl bg-blue-600 text-white flex items-center justify-center shrink-0">
-                    <Type className="w-6 h-6" />
-                  </div>
-                  <div>
-                    <h3 className="text-lg font-bold text-blue-950">Tap anywhere to type</h3>
-                    <p className="text-base text-blue-900/80">
-                      Tap a line on your PDF to open the keyboard, drag to move, and resize text.
-                    </p>
-                  </div>
-                </div>
+              <div className="space-y-3">
+                {/* Recently opened PDF & Word files */}
+                {recentFiles.map((file) => (
+                  <button
+                    key={file.id}
+                    type="button"
+                    disabled={isBusy}
+                    onClick={() => handleOpenRecent(file)}
+                    className="w-full min-h-[68px] p-3 rounded-2xl bg-blue-50/70 border border-blue-200 hover:bg-blue-100/80 active:scale-[0.99] transition-all flex items-center gap-3.5 text-left"
+                  >
+                    <FileTypeIcon kind={file.kind} />
+                    <div className="flex-1 min-w-0">
+                      <p className="text-base font-bold text-blue-950 truncate">
+                        {file.name}
+                      </p>
+                      <p className="text-base text-blue-800">
+                        {file.kind === 'word'
+                          ? 'Word Document · Opens as PDF'
+                          : 'PDF Document'}
+                      </p>
+                    </div>
+                    <ChevronRight className="w-6 h-6 text-blue-600 shrink-0" />
+                  </button>
+                ))}
 
-                <div className="flex items-start gap-4">
-                  <div className="w-12 h-12 rounded-2xl bg-blue-100 text-blue-700 flex items-center justify-center shrink-0">
-                    <CheckSquare className="w-6 h-6" />
-                  </div>
-                  <div>
-                    <h3 className="text-lg font-bold text-blue-950">Add ticks and checkboxes</h3>
-                    <p className="text-base text-blue-900/80">
-                      Tap Tick, then tap any box on your form to place a clean checkmark.
-                    </p>
-                  </div>
-                </div>
+                {/* Starter Sample PDF (PDF icon) */}
+                {!hasSamplePdfInRecent && (
+                  <button
+                    type="button"
+                    disabled={isBusy}
+                    onClick={handleLoadSamplePdf}
+                    className="w-full min-h-[68px] p-3 rounded-2xl bg-blue-50/70 border border-blue-200 hover:bg-blue-100/80 active:scale-[0.99] transition-all flex items-center gap-3.5 text-left"
+                  >
+                    <FileTypeIcon kind="pdf" />
+                    <div className="flex-1 min-w-0">
+                      <p className="text-base font-bold text-blue-950 truncate">
+                        Sample_Application_Form.pdf
+                      </p>
+                      <p className="text-base text-blue-800">
+                        PDF Form · Ready to fill
+                      </p>
+                    </div>
+                    <ChevronRight className="w-6 h-6 text-blue-600 shrink-0" />
+                  </button>
+                )}
 
-                <div className="flex items-start gap-4">
-                  <div className="w-12 h-12 rounded-2xl bg-blue-100 text-blue-700 flex items-center justify-center shrink-0">
-                    <PenTool className="w-6 h-6" />
-                  </div>
-                  <div>
-                    <h3 className="text-lg font-bold text-blue-950">Sign with your finger & save</h3>
-                    <p className="text-base text-blue-900/80">
-                      Draw your signature smoothly, place it on the page, and download instantly.
-                    </p>
-                  </div>
-                </div>
+                {/* Starter Sample Word Doc (W icon) */}
+                {!hasSampleWordInRecent && (
+                  <button
+                    type="button"
+                    disabled={isBusy}
+                    onClick={handleLoadSampleWord}
+                    className="w-full min-h-[68px] p-3 rounded-2xl bg-blue-50/70 border border-blue-200 hover:bg-blue-100/80 active:scale-[0.99] transition-all flex items-center gap-3.5 text-left"
+                  >
+                    <FileTypeIcon kind="word" />
+                    <div className="flex-1 min-w-0">
+                      <p className="text-base font-bold text-blue-950 truncate">
+                        Sample_Word_Form.docx
+                      </p>
+                      <p className="text-base text-blue-800">
+                        Word Document · Converts to PDF
+                      </p>
+                    </div>
+                    <ChevronRight className="w-6 h-6 text-blue-600 shrink-0" />
+                  </button>
+                )}
               </div>
             </section>
           </div>
@@ -441,14 +605,17 @@ export default function App() {
         <main className="flex-1 pb-28">
           {/* Document Bar (File info + Zoom controls) */}
           <div className="max-w-3xl mx-auto px-4 pt-4 pb-3 flex flex-wrap items-center justify-between gap-3">
-            <div className="min-w-0">
-              <p className="text-base font-bold text-blue-950 truncate">{fileName}</p>
-              <p className="text-base text-blue-800 font-medium">
-                {pages.length} {pages.length === 1 ? 'page' : 'pages'} ·{' '}
-                {activeTool === 'tick'
-                  ? 'Tap PDF to add a tick'
-                  : 'Tap PDF to type text'}
-              </p>
+            <div className="flex items-center gap-3 min-w-0 flex-1">
+              <FileTypeIcon kind={sourceKind} />
+              <div className="min-w-0">
+                <p className="text-base font-bold text-blue-950 truncate">{fileName}</p>
+                <p className="text-base text-blue-800 font-medium">
+                  {pages.length} {pages.length === 1 ? 'page' : 'pages'} ·{' '}
+                  {activeTool === 'tick'
+                    ? 'Tap page to add a tick'
+                    : 'Tap page to type text'}
+                </p>
+              </div>
             </div>
 
             <div className="flex items-center gap-1.5 bg-white border border-blue-200 rounded-2xl p-1 shrink-0">
