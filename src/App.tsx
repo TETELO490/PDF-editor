@@ -46,6 +46,7 @@ import {
 } from './utils/recentFilesDb';
 import { savePdfToDevice } from './utils/savePdfFile';
 import { convertWordBytesToPdf, createSampleWordDocx } from './utils/wordToPdf';
+import { convertYamlTextToPdf } from './utils/yamlToPdf';
 
 pdfjsLib.GlobalWorkerOptions.workerSrc = pdfWorkerUrl;
 
@@ -115,6 +116,11 @@ export default function App() {
 
   const [isDownloading, setIsDownloading] = useState(false);
   const [downloadSuccess, setDownloadSuccess] = useState(false);
+
+  const [yamlFileName, setYamlFileName] = useState<string>('');
+  const [yamlText, setYamlText] = useState<string>('');
+  const [isDownloadingYaml, setIsDownloadingYaml] = useState(false);
+  const [yamlDownloadSuccess, setYamlDownloadSuccess] = useState(false);
 
   // Always holds latest active editing state so exit/background handlers save immediately
   const latestSessionRef = useRef<{
@@ -291,6 +297,25 @@ export default function App() {
         return;
       }
 
+      if (kind === 'yaml') {
+        try {
+          const text = new TextDecoder('utf-8').decode(rawBytes);
+          const convertedPdfBytes = convertYamlTextToPdf(text, originalName);
+          if (persistRecent) {
+            const updated = await saveRecentFile({
+              name: originalName,
+              kind: 'yaml',
+              bytes: rawBytes,
+            });
+            if (updated.length > 0) setRecentFiles(updated);
+          }
+          await loadPdfFromBytes(convertedPdfBytes, originalName, 'yaml');
+        } catch {
+          setErrorMessage('Could not convert this YAML file to PDF.');
+        }
+        return;
+      }
+
       if (persistRecent) {
         const updated = await saveRecentFile({
           name: originalName,
@@ -330,14 +355,60 @@ export default function App() {
 
     const lower = file.name.toLowerCase();
     const isAllowed =
-      lower.endsWith('.pdf') || lower.endsWith('.docx') || lower.endsWith('.doc');
+      lower.endsWith('.pdf') ||
+      lower.endsWith('.docx') ||
+      lower.endsWith('.doc') ||
+      lower.endsWith('.yaml') ||
+      lower.endsWith('.yml');
     if (!isAllowed) {
-      setErrorMessage('Please choose a .pdf, .docx, or .doc file.');
+      setErrorMessage('Please choose a .pdf, .docx, .doc, or .yaml file.');
       return;
     }
 
     const buffer = await file.arrayBuffer();
     await openDocumentBytes(new Uint8Array(buffer), file.name, true);
+  };
+
+  const handleYamlFilePicked = async (e: React.ChangeEvent<HTMLInputElement>) => {
+    const file = e.target.files?.[0];
+    if (!file) return;
+
+    setErrorMessage(null);
+    setYamlDownloadSuccess(false);
+
+    try {
+      const text = await file.text();
+      setYamlFileName(file.name);
+      setYamlText(text);
+    } catch {
+      setErrorMessage('Could not read the selected .yaml file.');
+    }
+  };
+
+  const handleDownloadYamlPdf = async () => {
+    if (!yamlText && !yamlFileName) return;
+    if (isDownloadingYaml) return;
+    setIsDownloadingYaml(true);
+    setErrorMessage(null);
+    setYamlDownloadSuccess(false);
+
+    try {
+      const pdfOutBytes = convertYamlTextToPdf(yamlText, yamlFileName || 'document.yaml');
+      const baseName = (yamlFileName || 'document').replace(/\.(yaml|yml)$/i, '');
+      await savePdfToDevice(pdfOutBytes, `${baseName}.pdf`);
+      setYamlDownloadSuccess(true);
+      setTimeout(() => setYamlDownloadSuccess(false), 3500);
+    } catch {
+      setErrorMessage('Failed to create PDF from YAML file.');
+    } finally {
+      setIsDownloadingYaml(false);
+    }
+  };
+
+  const handleOpenYamlInEditor = async () => {
+    if (!yamlFileName) return;
+    const rawBytes = new TextEncoder().encode(yamlText);
+    await openDocumentBytes(rawBytes, yamlFileName, true);
   };
 
   const handleOpenRecent = async (entry: RecentFileEntry) => {
@@ -529,7 +600,7 @@ export default function App() {
 
     try {
       const filledBytes = await exportFilledPdf(pdfBytes, annotations);
-      const baseName = fileName.replace(/\.(pdf|docx|doc)$/i, '') || 'document';
+      const baseName = fileName.replace(/\.(pdf|docx|doc|yaml|yml)$/i, '') || 'document';
       await savePdfToDevice(filledBytes, `filled_${baseName}.pdf`);
       setDownloadSuccess(true);
       setTimeout(() => setDownloadSuccess(false), 3500);
@@ -555,7 +626,7 @@ export default function App() {
       <input
         ref={fileInputRef}
         type="file"
-        accept=".pdf,.docx,.doc,application/pdf,application/vnd.openxmlformats-officedocument.wordprocessingml.document,application/msword"
+        accept=".pdf,.docx,.doc,.yaml,.yml,application/pdf,application/vnd.openxmlformats-officedocument.wordprocessingml.document,application/msword,text/yaml,application/x-yaml"
         onChange={handleFileSelected}
         className="hidden"
       />
@@ -643,42 +714,103 @@ export default function App() {
       {!pdfDoc ? (
         <main className="flex-1 flex items-start md:items-center justify-center px-4 py-6 md:py-10">
           <div className="w-full max-w-5xl grid grid-cols-1 lg:grid-cols-2 gap-6 items-start">
-            {/* Primary Open File Card */}
-            <section className="bg-white rounded-3xl border border-blue-200 shadow-sm p-6 sm:p-8 flex flex-col justify-between gap-6">
-              <div className="space-y-4">
-                <h1 className="text-3xl sm:text-4xl font-extrabold tracking-tight text-blue-950 text-balance">
-                  Fill and sign PDF or Word files on your phone
-                </h1>
-                <p className="text-lg text-blue-900/80 leading-relaxed">
-                  Open a PDF or Word document, tap anywhere to type, add ticks, draw your signature, and save as a filled PDF. All your edits save automatically in Drafts.
-                </p>
-              </div>
+            {/* Left Column: Open File + YAML to PDF */}
+            <div className="space-y-6">
+              {/* Primary Open File Card */}
+              <section className="bg-white rounded-3xl border border-blue-200 shadow-sm p-6 sm:p-8 flex flex-col justify-between gap-6">
+                <div className="space-y-4">
+                  <h1 className="text-3xl sm:text-4xl font-extrabold tracking-tight text-blue-950 text-balance">
+                    Fill and sign PDF or Word files on your phone
+                  </h1>
+                  <p className="text-lg text-blue-900/80 leading-relaxed">
+                    Open a PDF or Word document, tap anywhere to type, add ticks, draw your signature, and save as a filled PDF. All your edits save automatically in Drafts.
+                  </p>
+                </div>
 
-              <div className="space-y-4">
-                <button
-                  type="button"
-                  onClick={triggerOpenFile}
-                  disabled={isBusy}
-                  className="w-full min-h-[64px] px-6 rounded-2xl bg-blue-600 text-white text-xl font-bold flex items-center justify-center gap-3 shadow-lg shadow-blue-600/20 hover:bg-blue-700 active:scale-[0.98] transition-transform disabled:opacity-70"
-                >
-                  {isConvertingWord ? (
-                    <>
-                      <Loader2 className="w-7 h-7 animate-spin" />
-                      <span>Converting Word to PDF...</span>
-                    </>
-                  ) : (
-                    <>
-                      <FolderOpen className="w-7 h-7" />
-                      <span>{isLoadingPdf ? 'Opening File...' : 'Open File'}</span>
-                    </>
-                  )}
-                </button>
+                <div className="space-y-4">
+                  <button
+                    type="button"
+                    onClick={triggerOpenFile}
+                    disabled={isBusy}
+                    className="w-full min-h-[64px] px-6 rounded-2xl bg-blue-600 text-white text-xl font-bold flex items-center justify-center gap-3 shadow-lg shadow-blue-600/20 hover:bg-blue-700 active:scale-[0.98] transition-transform disabled:opacity-70"
+                  >
+                    {isConvertingWord ? (
+                      <>
+                        <Loader2 className="w-7 h-7 animate-spin" />
+                        <span>Converting Word to PDF...</span>
+                      </>
+                    ) : (
+                      <>
+                        <FolderOpen className="w-7 h-7" />
+                        <span>{isLoadingPdf ? 'Opening File...' : 'Open File'}</span>
+                      </>
+                    )}
+                  </button>
 
-                <p className="text-center text-base font-semibold text-blue-800">
-                  Supports .pdf, .docx, and .doc files
-                </p>
-              </div>
-            </section>
+                  <p className="text-center text-base font-semibold text-blue-800">
+                    Supports .pdf, .docx, .doc, and .yaml files
+                  </p>
+                </div>
+              </section>
+
+              {/* YAML to PDF Card */}
+              <section className="bg-white rounded-3xl border border-blue-200 shadow-sm p-6 sm:p-8 flex flex-col gap-4">
+                <div className="space-y-1">
+                  <h2 className="text-2xl font-bold text-blue-950">YAML to PDF</h2>
+                  <p className="text-base text-blue-900/80">
+                    Pick a .yaml file and download it as a formatted PDF.
+                  </p>
+                </div>
+
+                <input
+                  type="file"
+                  accept=".yaml,.yml,text/yaml,application/x-yaml"
+                  onChange={handleYamlFilePicked}
+                  aria-label="Pick YAML file"
+                  className="block w-full text-base font-semibold text-blue-950 bg-blue-50 border-2 border-blue-200 rounded-2xl p-2.5 file:mr-4 file:min-h-[44px] file:px-4 file:rounded-xl file:border-0 file:bg-blue-600 file:text-white file:text-base file:font-bold hover:file:bg-blue-700 cursor-pointer"
+                />
+
+                {yamlFileName && (
+                  <div className="space-y-3">
+                    <pre className="max-h-36 overflow-auto rounded-2xl bg-blue-50/70 border border-blue-200 p-3 text-sm font-mono text-blue-950 whitespace-pre-wrap break-words">
+                      {yamlText || '(Empty YAML file)'}
+                    </pre>
+
+                    <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
+                      <button
+                        type="button"
+                        onClick={handleDownloadYamlPdf}
+                        disabled={isDownloadingYaml}
+                        className="w-full min-h-[54px] px-5 rounded-2xl bg-blue-600 text-white text-lg font-bold flex items-center justify-center gap-2 shadow-md shadow-blue-600/20 hover:bg-blue-700 active:scale-[0.98] transition-transform"
+                      >
+                        {yamlDownloadSuccess ? (
+                          <Check className="w-6 h-6" />
+                        ) : (
+                          <Download className="w-6 h-6" />
+                        )}
+                        <span>
+                          {yamlDownloadSuccess
+                            ? 'Downloaded!'
+                            : isDownloadingYaml
+                              ? 'Creating PDF...'
+                              : 'Download PDF'}
+                        </span>
+                      </button>
+
+                      <button
+                        type="button"
+                        onClick={handleOpenYamlInEditor}
+                        disabled={isBusy}
+                        className="w-full min-h-[54px] px-5 rounded-2xl bg-blue-50 border-2 border-blue-200 text-blue-900 text-lg font-bold flex items-center justify-center gap-2 hover:bg-blue-100 active:scale-[0.98] transition-transform"
+                      >
+                        <FileText className="w-5 h-5 text-blue-700" />
+                        <span>Open &amp; Fill</span>
+                      </button>
+                    </div>
+                  </div>
+                )}
+              </section>
+            </div>
 
             {/* Right Column: Auto-Saved Drafts + File List */}
             <div className="space-y-6">
@@ -766,7 +898,9 @@ export default function App() {
                         <p className="text-base text-blue-800">
                           {file.kind === 'word'
                             ? 'Word Document · Opens as PDF'
-                            : 'PDF Document'}
+                            : file.kind === 'yaml'
+                              ? 'YAML File · Opens as PDF'
+                              : 'PDF Document'}
                         </p>
                       </div>
                       <ChevronRight className="w-6 h-6 text-blue-600 shrink-0" />

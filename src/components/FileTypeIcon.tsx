@@ -17,6 +17,17 @@ export const FileTypeIcon: React.FC<FileTypeIconProps> = ({ kind }) => {
     );
   }
 
+  if (kind === 'yaml') {
+    return (
+      <div
+        className="w-12 h-12 rounded-2xl bg-blue-100 text-blue-800 flex flex-col items-center justify-center shrink-0 border-2 border-blue-500 shadow-sm"
+        aria-label="YAML file"
+      >
+        <span className="text-sm font-extrabold leading-none tracking-tight">YML</span>
+      </div>
+    );
+  }
+
   return (
     <div
       className="w-12 h-12 rounded-2xl bg-white text-blue-700 flex flex-col items-center justify-center shrink-0 border-2 border-blue-600 shadow-sm"

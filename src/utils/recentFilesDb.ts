@@ -1,4 +1,4 @@
-export type DocumentKind = 'pdf' | 'word';
+export type DocumentKind = 'pdf' | 'word' | 'yaml';
 
 export interface RecentFileEntry {
   id: string;
@@ -30,6 +30,9 @@ export function detectDocumentKind(fileName: string): DocumentKind {
   const lower = fileName.toLowerCase();
   if (lower.endsWith('.docx') || lower.endsWith('.doc')) {
     return 'word';
+  }
+  if (lower.endsWith('.yaml') || lower.endsWith('.yml')) {
+    return 'yaml';
   }
   return 'pdf';
 }
