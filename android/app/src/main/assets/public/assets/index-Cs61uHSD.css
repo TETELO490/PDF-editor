@@ -576,6 +576,10 @@
     min-height: 68px;
   }
 
+  .min-h-\[72px\] {
+    min-height: 72px;
+  }
+
   .min-h-dvh {
     min-height: 100dvh;
   }
@@ -672,6 +676,10 @@
     cursor: not-allowed;
   }
 
+  .cursor-pointer {
+    cursor: pointer;
+  }
+
   .cursor-text {
     cursor: text;
   }
@@ -712,8 +720,8 @@
     align-items: flex-end;
   }
 
-  .items-stretch {
-    align-items: stretch;
+  .items-start {
+    align-items: flex-start;
   }
 
   .justify-between {
@@ -774,6 +782,12 @@
     --tw-space-y-reverse: 0;
     margin-block-start: calc(calc(var(--spacing) * 5) * var(--tw-space-y-reverse));
     margin-block-end: calc(calc(var(--spacing) * 5) * calc(1 - var(--tw-space-y-reverse)));
+  }
+
+  :where(.space-y-6 > :not(:last-child)) {
+    --tw-space-y-reverse: 0;
+    margin-block-start: calc(calc(var(--spacing) * 6) * var(--tw-space-y-reverse));
+    margin-block-end: calc(calc(var(--spacing) * 6) * calc(1 - var(--tw-space-y-reverse)));
   }
 
   .truncate {
@@ -1023,6 +1037,10 @@
     padding-block: var(--spacing);
   }
 
+  .py-2 {
+    padding-block: calc(var(--spacing) * 2);
+  }
+
   .py-3 {
     padding-block: calc(var(--spacing) * 3);
   }
@@ -1170,6 +1188,16 @@
 
   .text-blue-900 {
     color: var(--color-blue-900);
+  }
+
+  .text-blue-900\/75 {
+    color: #1c398ebf;
+  }
+
+  @supports (color: color-mix(in lab, red, red)) {
+    .text-blue-900\/75 {
+      color: color-mix(in oklab, var(--color-blue-900) 75%, transparent);
+    }
   }
 
   .text-blue-900\/80 {

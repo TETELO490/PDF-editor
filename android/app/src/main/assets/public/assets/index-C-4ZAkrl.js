@@ -36586,6 +36586,77 @@ var SignatureModal = ({ isOpen, savedSignature, onClose, onConfirm }) => {
 		})
 	});
 };
+// src/utils/draftsDb.ts
+var DB_NAME$1 = "bluefill_drafts_db";
+var STORE_NAME$1 = "drafts";
+var MAX_DRAFTS = 12;
+function openDraftsDb() {
+	return new Promise((resolve, reject) => {
+		const req = indexedDB.open(DB_NAME$1, 1);
+		req.onupgradeneeded = () => {
+			const db = req.result;
+			if (!db.objectStoreNames.contains(STORE_NAME$1)) db.createObjectStore(STORE_NAME$1, { keyPath: "id" });
+		};
+		req.onsuccess = () => resolve(req.result);
+		req.onerror = () => reject(req.error);
+	});
+}
+async function loadDrafts() {
+	try {
+		const db = await openDraftsDb();
+		return await new Promise((resolve) => {
+			const req = db.transaction(STORE_NAME$1, "readonly").objectStore(STORE_NAME$1).getAll();
+			req.onsuccess = () => {
+				const normalized = (req.result || []).map((row) => ({
+					...row,
+					pdfBytes: row.pdfBytes instanceof Uint8Array ? row.pdfBytes : new Uint8Array(row.pdfBytes),
+					annotations: Array.isArray(row.annotations) ? row.annotations : []
+				}));
+				normalized.sort((a, b) => b.updatedAt - a.updatedAt);
+				resolve(normalized);
+			};
+			req.onerror = () => resolve([]);
+		});
+	} catch {
+		return [];
+	}
+}
+async function saveDraft(draft) {
+	try {
+		const db = await openDraftsDb();
+		const filtered = (await loadDrafts()).filter((item) => item.id !== draft.id);
+		const nextList = [{
+			...draft,
+			pdfBytes: new Uint8Array(draft.pdfBytes),
+			updatedAt: Date.now()
+		}, ...filtered].slice(0, MAX_DRAFTS);
+		await new Promise((resolve) => {
+			const tx = db.transaction(STORE_NAME$1, "readwrite");
+			const store = tx.objectStore(STORE_NAME$1);
+			store.clear();
+			nextList.forEach((item) => store.put(item));
+			tx.oncomplete = () => resolve();
+			tx.onerror = () => resolve();
+		});
+		return nextList;
+	} catch {
+		return [];
+	}
+}
+async function deleteDraft(draftId) {
+	try {
+		const db = await openDraftsDb();
+		await new Promise((resolve) => {
+			const tx = db.transaction(STORE_NAME$1, "readwrite");
+			tx.objectStore(STORE_NAME$1).delete(draftId);
+			tx.oncomplete = () => resolve();
+			tx.onerror = () => resolve();
+		});
+		return await loadDrafts();
+	} catch {
+		return [];
+	}
+}
 // node_modules/pdf-lib/node_modules/tslib/tslib.es6.js
 /*! *****************************************************************************
 Copyright (c) Microsoft Corporation.
@@ -60173,10 +60244,10 @@ var __vitePreload = function preload(baseModule, deps, importerUrl) {
 	});
 };
 // node_modules/@capacitor/filesystem/dist/esm/index.js
-var Filesystem = registerPlugin("Filesystem", { web: () => __vitePreload(() => import("./web-DiCaxjJR.js").then((m) => new m.FilesystemWeb()), []) });
+var Filesystem = registerPlugin("Filesystem", { web: () => __vitePreload(() => import("./web-DTmsHZ6E.js").then((m) => new m.FilesystemWeb()), []) });
 f();
 // node_modules/@capacitor/share/dist/esm/index.js
-var Share = registerPlugin("Share", { web: () => __vitePreload(() => import("./web-CBpr1PpI.js").then((m) => new m.ShareWeb()), []) });
+var Share = registerPlugin("Share", { web: () => __vitePreload(() => import("./web-WJmW-STP.js").then((m) => new m.ShareWeb()), []) });
 // src/utils/savePdfFile.ts
 function uint8ArrayToBase64(bytes) {
 	const chunkSize = 32768;
@@ -98229,18 +98300,38 @@ function createId() {
 	if (typeof crypto !== "undefined" && typeof crypto.randomUUID === "function") return crypto.randomUUID();
 	return `${Date.now()}-${Math.random().toString(36).slice(2, 9)}`;
 }
+function formatDraftTimestamp(timestamp) {
+	const diffMs = Date.now() - timestamp;
+	if (diffMs < 6e4) return "Just now";
+	if (diffMs < 36e5) return `${Math.max(1, Math.floor(diffMs / 6e4))}m ago`;
+	const date = new Date(timestamp);
+	const now = /* @__PURE__ */ new Date();
+	const isToday = date.getDate() === now.getDate() && date.getMonth() === now.getMonth() && date.getFullYear() === now.getFullYear();
+	const timeStr = date.toLocaleTimeString([], {
+		hour: "numeric",
+		minute: "2-digit"
+	});
+	if (isToday) return `Today, ${timeStr}`;
+	return `${date.toLocaleDateString([], {
+		month: "short",
+		day: "numeric"
+	})}, ${timeStr}`;
+}
 function App() {
 	const fileInputRef = (0, import_react.useRef)(null);
 	const pageContainerRefs = (0, import_react.useRef)({});
 	const [pdfBytes, setPdfBytes] = (0, import_react.useState)(null);
 	const [fileName, setFileName] = (0, import_react.useState)("");
 	const [sourceKind, setSourceKind] = (0, import_react.useState)("pdf");
+	const [activeDraftId, setActiveDraftId] = (0, import_react.useState)(null);
 	const [pdfDoc, setPdfDoc] = (0, import_react.useState)(null);
 	const [pages, setPages] = (0, import_react.useState)([]);
 	const [isLoadingPdf, setIsLoadingPdf] = (0, import_react.useState)(false);
 	const [isConvertingWord, setIsConvertingWord] = (0, import_react.useState)(false);
 	const [errorMessage, setErrorMessage] = (0, import_react.useState)(null);
 	const [recentFiles, setRecentFiles] = (0, import_react.useState)([]);
+	const [drafts, setDrafts] = (0, import_react.useState)([]);
+	const [draftSavedHint, setDraftSavedHint] = (0, import_react.useState)(false);
 	const [activeTool, setActiveTool] = (0, import_react.useState)("text");
 	const [annotations, setAnnotations] = (0, import_react.useState)([]);
 	const [selectedId, setSelectedId] = (0, import_react.useState)(null);
@@ -98250,10 +98341,78 @@ function App() {
 	const [savedSignature, setSavedSignature] = (0, import_react.useState)(null);
 	const [isDownloading, setIsDownloading] = (0, import_react.useState)(false);
 	const [downloadSuccess, setDownloadSuccess] = (0, import_react.useState)(false);
+	const latestSessionRef = (0, import_react.useRef)({
+		draftId: null,
+		pdfBytes: null,
+		fileName: "",
+		sourceKind: "pdf",
+		annotations: [],
+		hasExistingDraft: false
+	});
+	latestSessionRef.current = {
+		draftId: activeDraftId,
+		pdfBytes,
+		fileName,
+		sourceKind,
+		annotations,
+		hasExistingDraft: Boolean(activeDraftId && drafts.some((d) => d.id === activeDraftId))
+	};
 	(0, import_react.useEffect)(() => {
 		loadRecentFiles().then(setRecentFiles);
+		loadDrafts().then(setDrafts);
 	}, []);
-	const loadPdfFromBytes = (0, import_react.useCallback)(async (bytes, name, kind) => {
+	const persistCurrentDraftNow = (0, import_react.useCallback)(async () => {
+		const snap = latestSessionRef.current;
+		if (!snap.draftId || !snap.pdfBytes) return;
+		if (snap.annotations.length === 0 && !snap.hasExistingDraft) return;
+		const updated = await saveDraft({
+			id: snap.draftId,
+			name: snap.fileName,
+			kind: snap.sourceKind,
+			pdfBytes: snap.pdfBytes,
+			annotations: snap.annotations,
+			updatedAt: Date.now()
+		});
+		if (updated.length > 0) {
+			setDrafts(updated);
+			setDraftSavedHint(true);
+		}
+	}, []);
+	(0, import_react.useEffect)(() => {
+		if (!activeDraftId || !pdfBytes) return;
+		const hasExisting = drafts.some((d) => d.id === activeDraftId);
+		if (annotations.length === 0 && !hasExisting) {
+			setDraftSavedHint(false);
+			return;
+		}
+		const timer = window.setTimeout(() => {
+			persistCurrentDraftNow();
+		}, 250);
+		return () => window.clearTimeout(timer);
+	}, [
+		annotations,
+		activeDraftId,
+		pdfBytes,
+		drafts,
+		persistCurrentDraftNow
+	]);
+	(0, import_react.useEffect)(() => {
+		const flushOnExit = () => {
+			persistCurrentDraftNow();
+		};
+		const handleVisibilityChange = () => {
+			if (document.visibilityState === "hidden") flushOnExit();
+		};
+		document.addEventListener("visibilitychange", handleVisibilityChange);
+		window.addEventListener("pagehide", flushOnExit);
+		window.addEventListener("beforeunload", flushOnExit);
+		return () => {
+			document.removeEventListener("visibilitychange", handleVisibilityChange);
+			window.removeEventListener("pagehide", flushOnExit);
+			window.removeEventListener("beforeunload", flushOnExit);
+		};
+	}, [persistCurrentDraftNow]);
+	const loadPdfFromBytes = (0, import_react.useCallback)(async (bytes, name, kind, initialAnnotations = [], existingDraftId) => {
 		setIsLoadingPdf(true);
 		setErrorMessage(null);
 		setDownloadSuccess(false);
@@ -98267,9 +98426,11 @@ function App() {
 			setPdfBytes(bytes);
 			setFileName(name);
 			setSourceKind(kind);
+			setActiveDraftId(existingDraftId ?? createId());
 			setPdfDoc(doc);
 			setPages(loadedPages);
-			setAnnotations([]);
+			setAnnotations(initialAnnotations);
+			setDraftSavedHint(initialAnnotations.length > 0);
 			setSelectedId(null);
 			setFocusTextId(null);
 			setActiveTool("text");
@@ -98286,6 +98447,7 @@ function App() {
 		};
 	}, [pdfDoc]);
 	const openDocumentBytes = (0, import_react.useCallback)(async (rawBytes, originalName, persistRecent = true) => {
+		await persistCurrentDraftNow();
 		const kind = detectDocumentKind(originalName);
 		setErrorMessage(null);
 		if (kind === "word") {
@@ -98318,7 +98480,15 @@ function App() {
 			if (updated.length > 0) setRecentFiles(updated);
 		}
 		await loadPdfFromBytes(rawBytes, originalName, "pdf");
-	}, [loadPdfFromBytes]);
+	}, [loadPdfFromBytes, persistCurrentDraftNow]);
+	const handleOpenDraft = async (draft) => {
+		await loadPdfFromBytes(new Uint8Array(draft.pdfBytes), draft.name, draft.kind, draft.annotations, draft.id);
+	};
+	const handleDeleteDraft = async (e, draftId) => {
+		e.stopPropagation();
+		const updated = await deleteDraft(draftId);
+		setDrafts(updated);
+	};
 	const handleFileSelected = async (e) => {
 		const file = e.target.files?.[0];
 		e.target.value = "";
@@ -98357,13 +98527,16 @@ function App() {
 	const triggerOpenFile = () => {
 		fileInputRef.current?.click();
 	};
-	const handleBackToFiles = () => {
+	const handleBackToFiles = async () => {
+		await persistCurrentDraftNow();
 		setPdfDoc(null);
 		setPages([]);
 		setPdfBytes(null);
+		setActiveDraftId(null);
 		setSelectedId(null);
 		setFocusTextId(null);
 		setAnnotations([]);
+		setDraftSavedHint(false);
 	};
 	const getMostVisiblePageIndex = () => {
 		if (pages.length <= 1) return 0;
@@ -98538,7 +98711,7 @@ function App() {
 							type: "button",
 							onClick: handleBackToFiles,
 							className: "min-h-[48px] min-w-[48px] rounded-xl bg-blue-50 border border-blue-200 text-blue-900 flex items-center justify-center hover:bg-blue-100 active:scale-95 transition-transform shrink-0",
-							"aria-label": "Back to file list",
+							"aria-label": "Back to drafts and files",
 							children: /* @__PURE__ */ (0, import_jsx_runtime.jsx)(ArrowLeft, { className: "w-5 h-5" })
 						}) : /* @__PURE__ */ (0, import_jsx_runtime.jsx)("div", {
 							className: "w-10 h-10 rounded-xl bg-blue-600 text-white flex items-center justify-center shrink-0",
@@ -98588,9 +98761,9 @@ function App() {
 				})
 			}),
 			!pdfDoc ? /* @__PURE__ */ (0, import_jsx_runtime.jsx)("main", {
-				className: "flex-1 flex items-center justify-center px-4 py-6 md:py-10",
+				className: "flex-1 flex items-start md:items-center justify-center px-4 py-6 md:py-10",
 				children: /* @__PURE__ */ (0, import_jsx_runtime.jsxs)("div", {
-					className: "w-full max-w-5xl grid grid-cols-1 lg:grid-cols-2 gap-6 items-stretch",
+					className: "w-full max-w-5xl grid grid-cols-1 lg:grid-cols-2 gap-6 items-start",
 					children: [/* @__PURE__ */ (0, import_jsx_runtime.jsxs)("section", {
 						className: "bg-white rounded-3xl border border-blue-200 shadow-sm p-6 sm:p-8 flex flex-col justify-between gap-6",
 						children: [/* @__PURE__ */ (0, import_jsx_runtime.jsxs)("div", {
@@ -98600,7 +98773,7 @@ function App() {
 								children: "Fill and sign PDF or Word files on your phone"
 							}), /* @__PURE__ */ (0, import_jsx_runtime.jsx)("p", {
 								className: "text-lg text-blue-900/80 leading-relaxed",
-								children: "Open a PDF or Word document, tap anywhere to type, add ticks, draw your signature, and save as a filled PDF."
+								children: "Open a PDF or Word document, tap anywhere to type, add ticks, draw your signature, and save as a filled PDF. All your edits save automatically in Drafts."
 							})]
 						}), /* @__PURE__ */ (0, import_jsx_runtime.jsxs)("div", {
 							className: "space-y-4",
@@ -98615,81 +98788,143 @@ function App() {
 								children: "Supports .pdf, .docx, and .doc files"
 							})]
 						})]
-					}), /* @__PURE__ */ (0, import_jsx_runtime.jsxs)("section", {
-						className: "bg-white rounded-3xl border border-blue-200 shadow-sm p-6 sm:p-8 flex flex-col gap-4",
-						children: [/* @__PURE__ */ (0, import_jsx_runtime.jsxs)("div", {
-							className: "flex items-center justify-between gap-2",
-							children: [/* @__PURE__ */ (0, import_jsx_runtime.jsx)("h2", {
-								className: "text-2xl font-bold text-blue-950",
-								children: "Files"
-							}), /* @__PURE__ */ (0, import_jsx_runtime.jsx)("span", {
-								className: "text-base font-semibold text-blue-700",
-								children: "Tap to open"
-							})]
-						}), /* @__PURE__ */ (0, import_jsx_runtime.jsxs)("div", {
-							className: "space-y-3",
-							children: [
-								recentFiles.map((file) => /* @__PURE__ */ (0, import_jsx_runtime.jsxs)("button", {
-									type: "button",
-									disabled: isBusy,
-									onClick: () => handleOpenRecent(file),
-									className: "w-full min-h-[68px] p-3 rounded-2xl bg-blue-50/70 border border-blue-200 hover:bg-blue-100/80 active:scale-[0.99] transition-all flex items-center gap-3.5 text-left",
-									children: [
-										/* @__PURE__ */ (0, import_jsx_runtime.jsx)(FileTypeIcon, { kind: file.kind }),
-										/* @__PURE__ */ (0, import_jsx_runtime.jsxs)("div", {
-											className: "flex-1 min-w-0",
-											children: [/* @__PURE__ */ (0, import_jsx_runtime.jsx)("p", {
-												className: "text-base font-bold text-blue-950 truncate",
-												children: file.name
-											}), /* @__PURE__ */ (0, import_jsx_runtime.jsx)("p", {
-												className: "text-base text-blue-800",
-												children: file.kind === "word" ? "Word Document · Opens as PDF" : "PDF Document"
-											})]
-										}),
-										/* @__PURE__ */ (0, import_jsx_runtime.jsx)(ChevronRight, { className: "w-6 h-6 text-blue-600 shrink-0" })
-									]
-								}, file.id)),
-								!hasSamplePdfInRecent && /* @__PURE__ */ (0, import_jsx_runtime.jsxs)("button", {
-									type: "button",
-									disabled: isBusy,
-									onClick: handleLoadSamplePdf,
-									className: "w-full min-h-[68px] p-3 rounded-2xl bg-blue-50/70 border border-blue-200 hover:bg-blue-100/80 active:scale-[0.99] transition-all flex items-center gap-3.5 text-left",
-									children: [
-										/* @__PURE__ */ (0, import_jsx_runtime.jsx)(FileTypeIcon, { kind: "pdf" }),
-										/* @__PURE__ */ (0, import_jsx_runtime.jsxs)("div", {
-											className: "flex-1 min-w-0",
-											children: [/* @__PURE__ */ (0, import_jsx_runtime.jsx)("p", {
-												className: "text-base font-bold text-blue-950 truncate",
-												children: "Sample_Application_Form.pdf"
-											}), /* @__PURE__ */ (0, import_jsx_runtime.jsx)("p", {
-												className: "text-base text-blue-800",
-												children: "PDF Form · Ready to fill"
-											})]
-										}),
-										/* @__PURE__ */ (0, import_jsx_runtime.jsx)(ChevronRight, { className: "w-6 h-6 text-blue-600 shrink-0" })
-									]
-								}),
-								!hasSampleWordInRecent && /* @__PURE__ */ (0, import_jsx_runtime.jsxs)("button", {
-									type: "button",
-									disabled: isBusy,
-									onClick: handleLoadSampleWord,
-									className: "w-full min-h-[68px] p-3 rounded-2xl bg-blue-50/70 border border-blue-200 hover:bg-blue-100/80 active:scale-[0.99] transition-all flex items-center gap-3.5 text-left",
-									children: [
-										/* @__PURE__ */ (0, import_jsx_runtime.jsx)(FileTypeIcon, { kind: "word" }),
-										/* @__PURE__ */ (0, import_jsx_runtime.jsxs)("div", {
-											className: "flex-1 min-w-0",
-											children: [/* @__PURE__ */ (0, import_jsx_runtime.jsx)("p", {
-												className: "text-base font-bold text-blue-950 truncate",
-												children: "Sample_Word_Form.docx"
-											}), /* @__PURE__ */ (0, import_jsx_runtime.jsx)("p", {
-												className: "text-base text-blue-800",
-												children: "Word Document · Converts to PDF"
-											})]
-										}),
-										/* @__PURE__ */ (0, import_jsx_runtime.jsx)(ChevronRight, { className: "w-6 h-6 text-blue-600 shrink-0" })
-									]
+					}), /* @__PURE__ */ (0, import_jsx_runtime.jsxs)("div", {
+						className: "space-y-6",
+						children: [/* @__PURE__ */ (0, import_jsx_runtime.jsxs)("section", {
+							className: "bg-white rounded-3xl border border-blue-200 shadow-sm p-6 flex flex-col gap-4",
+							children: [/* @__PURE__ */ (0, import_jsx_runtime.jsxs)("div", {
+								className: "flex items-center justify-between gap-2",
+								children: [/* @__PURE__ */ (0, import_jsx_runtime.jsx)("h2", {
+									className: "text-2xl font-bold text-blue-950",
+									children: "Drafts"
+								}), /* @__PURE__ */ (0, import_jsx_runtime.jsx)("span", {
+									className: "text-base font-semibold text-blue-700",
+									children: "Saved automatically"
+								})]
+							}), drafts.length === 0 ? /* @__PURE__ */ (0, import_jsx_runtime.jsx)("p", {
+								className: "text-base text-blue-900/75 py-2",
+								children: "Any PDF or Word project you start filling is saved here automatically so you can continue anytime."
+							}) : /* @__PURE__ */ (0, import_jsx_runtime.jsx)("div", {
+								className: "space-y-3",
+								children: drafts.map((draft) => {
+									const editCount = draft.annotations.length;
+									return /* @__PURE__ */ (0, import_jsx_runtime.jsxs)("div", {
+										onClick: () => !isBusy && void handleOpenDraft(draft),
+										role: "button",
+										tabIndex: 0,
+										onKeyDown: (e) => {
+											if ((e.key === "Enter" || e.key === " ") && !isBusy) {
+												e.preventDefault();
+												handleOpenDraft(draft);
+											}
+										},
+										className: "w-full min-h-[72px] p-3 rounded-2xl bg-blue-50 border-2 border-blue-300 hover:bg-blue-100/80 active:scale-[0.99] transition-all flex items-center gap-3.5 text-left cursor-pointer",
+										children: [
+											/* @__PURE__ */ (0, import_jsx_runtime.jsx)(FileTypeIcon, { kind: draft.kind }),
+											/* @__PURE__ */ (0, import_jsx_runtime.jsxs)("div", {
+												className: "flex-1 min-w-0",
+												children: [/* @__PURE__ */ (0, import_jsx_runtime.jsx)("p", {
+													className: "text-base font-bold text-blue-950 truncate",
+													children: draft.name
+												}), /* @__PURE__ */ (0, import_jsx_runtime.jsxs)("p", {
+													className: "text-base text-blue-800",
+													children: [
+														editCount,
+														" ",
+														editCount === 1 ? "item" : "items",
+														" ·",
+														" ",
+														formatDraftTimestamp(draft.updatedAt)
+													]
+												})]
+											}),
+											/* @__PURE__ */ (0, import_jsx_runtime.jsx)("button", {
+												type: "button",
+												onClick: (e) => void handleDeleteDraft(e, draft.id),
+												className: "min-h-[48px] min-w-[48px] rounded-xl bg-white border border-blue-200 text-blue-800 flex items-center justify-center hover:bg-blue-50 active:scale-95 transition-transform shrink-0",
+												"aria-label": `Delete draft ${draft.name}`,
+												children: /* @__PURE__ */ (0, import_jsx_runtime.jsx)(Trash2, { className: "w-5 h-5" })
+											})
+										]
+									}, draft.id);
 								})
-							]
+							})]
+						}), /* @__PURE__ */ (0, import_jsx_runtime.jsxs)("section", {
+							className: "bg-white rounded-3xl border border-blue-200 shadow-sm p-6 flex flex-col gap-4",
+							children: [/* @__PURE__ */ (0, import_jsx_runtime.jsxs)("div", {
+								className: "flex items-center justify-between gap-2",
+								children: [/* @__PURE__ */ (0, import_jsx_runtime.jsx)("h2", {
+									className: "text-2xl font-bold text-blue-950",
+									children: "Files"
+								}), /* @__PURE__ */ (0, import_jsx_runtime.jsx)("span", {
+									className: "text-base font-semibold text-blue-700",
+									children: "Tap to open"
+								})]
+							}), /* @__PURE__ */ (0, import_jsx_runtime.jsxs)("div", {
+								className: "space-y-3",
+								children: [
+									recentFiles.map((file) => /* @__PURE__ */ (0, import_jsx_runtime.jsxs)("button", {
+										type: "button",
+										disabled: isBusy,
+										onClick: () => handleOpenRecent(file),
+										className: "w-full min-h-[68px] p-3 rounded-2xl bg-blue-50/70 border border-blue-200 hover:bg-blue-100/80 active:scale-[0.99] transition-all flex items-center gap-3.5 text-left",
+										children: [
+											/* @__PURE__ */ (0, import_jsx_runtime.jsx)(FileTypeIcon, { kind: file.kind }),
+											/* @__PURE__ */ (0, import_jsx_runtime.jsxs)("div", {
+												className: "flex-1 min-w-0",
+												children: [/* @__PURE__ */ (0, import_jsx_runtime.jsx)("p", {
+													className: "text-base font-bold text-blue-950 truncate",
+													children: file.name
+												}), /* @__PURE__ */ (0, import_jsx_runtime.jsx)("p", {
+													className: "text-base text-blue-800",
+													children: file.kind === "word" ? "Word Document · Opens as PDF" : "PDF Document"
+												})]
+											}),
+											/* @__PURE__ */ (0, import_jsx_runtime.jsx)(ChevronRight, { className: "w-6 h-6 text-blue-600 shrink-0" })
+										]
+									}, file.id)),
+									!hasSamplePdfInRecent && /* @__PURE__ */ (0, import_jsx_runtime.jsxs)("button", {
+										type: "button",
+										disabled: isBusy,
+										onClick: handleLoadSamplePdf,
+										className: "w-full min-h-[68px] p-3 rounded-2xl bg-blue-50/70 border border-blue-200 hover:bg-blue-100/80 active:scale-[0.99] transition-all flex items-center gap-3.5 text-left",
+										children: [
+											/* @__PURE__ */ (0, import_jsx_runtime.jsx)(FileTypeIcon, { kind: "pdf" }),
+											/* @__PURE__ */ (0, import_jsx_runtime.jsxs)("div", {
+												className: "flex-1 min-w-0",
+												children: [/* @__PURE__ */ (0, import_jsx_runtime.jsx)("p", {
+													className: "text-base font-bold text-blue-950 truncate",
+													children: "Sample_Application_Form.pdf"
+												}), /* @__PURE__ */ (0, import_jsx_runtime.jsx)("p", {
+													className: "text-base text-blue-800",
+													children: "PDF Form · Ready to fill"
+												})]
+											}),
+											/* @__PURE__ */ (0, import_jsx_runtime.jsx)(ChevronRight, { className: "w-6 h-6 text-blue-600 shrink-0" })
+										]
+									}),
+									!hasSampleWordInRecent && /* @__PURE__ */ (0, import_jsx_runtime.jsxs)("button", {
+										type: "button",
+										disabled: isBusy,
+										onClick: handleLoadSampleWord,
+										className: "w-full min-h-[68px] p-3 rounded-2xl bg-blue-50/70 border border-blue-200 hover:bg-blue-100/80 active:scale-[0.99] transition-all flex items-center gap-3.5 text-left",
+										children: [
+											/* @__PURE__ */ (0, import_jsx_runtime.jsx)(FileTypeIcon, { kind: "word" }),
+											/* @__PURE__ */ (0, import_jsx_runtime.jsxs)("div", {
+												className: "flex-1 min-w-0",
+												children: [/* @__PURE__ */ (0, import_jsx_runtime.jsx)("p", {
+													className: "text-base font-bold text-blue-950 truncate",
+													children: "Sample_Word_Form.docx"
+												}), /* @__PURE__ */ (0, import_jsx_runtime.jsx)("p", {
+													className: "text-base text-blue-800",
+													children: "Word Document · Converts to PDF"
+												})]
+											}),
+											/* @__PURE__ */ (0, import_jsx_runtime.jsx)(ChevronRight, { className: "w-6 h-6 text-blue-600 shrink-0" })
+										]
+									})
+								]
+							})]
 						})]
 					})]
 				})
@@ -98712,7 +98947,8 @@ function App() {
 									pages.length === 1 ? "page" : "pages",
 									" ·",
 									" ",
-									activeTool === "tick" ? "Tap page to add a tick" : "Tap page to type text"
+									activeTool === "tick" ? "Tap page to add a tick" : "Tap page to type text",
+									draftSavedHint ? " · Draft saved" : ""
 								]
 							})]
 						})]

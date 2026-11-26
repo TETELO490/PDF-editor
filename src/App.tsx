@@ -13,6 +13,7 @@ import {
   FolderOpen,
   Loader2,
   PenTool,
+  Trash2,
   Type,
   ZoomIn,
   ZoomOut,
@@ -29,6 +30,12 @@ import type {
   TickAnnotation,
   ToolMode,
 } from './types/pdf';
+import {
+  deleteDraft,
+  loadDrafts,
+  saveDraft,
+  type DraftProject,
+} from './utils/draftsDb';
 import { createSamplePdf, exportFilledPdf } from './utils/pdfEngine';
 import {
   detectDocumentKind,
@@ -49,6 +56,33 @@ function createId(): string {
   return `${Date.now()}-${Math.random().toString(36).slice(2, 9)}`;
 }
 
+function formatDraftTimestamp(timestamp: number): string {
+  const diffMs = Date.now() - timestamp;
+  if (diffMs < 60_000) return 'Just now';
+  if (diffMs < 3_600_000) {
+    const mins = Math.max(1, Math.floor(diffMs / 60_000));
+    return `${mins}m ago`;
+  }
+  const date = new Date(timestamp);
+  const now = new Date();
+  const isToday =
+    date.getDate() === now.getDate() &&
+    date.getMonth() === now.getMonth() &&
+    date.getFullYear() === now.getFullYear();
+
+  const timeStr = date.toLocaleTimeString([], {
+    hour: 'numeric',
+    minute: '2-digit',
+  });
+  if (isToday) return `Today, ${timeStr}`;
+
+  const dateStr = date.toLocaleDateString([], {
+    month: 'short',
+    day: 'numeric',
+  });
+  return `${dateStr}, ${timeStr}`;
+}
+
 export default function App() {
   const fileInputRef = useRef<HTMLInputElement | null>(null);
   const pageContainerRefs = useRef<Record<number, HTMLDivElement | null>>({});
@@ -56,6 +90,7 @@ export default function App() {
   const [pdfBytes, setPdfBytes] = useState<Uint8Array | null>(null);
   const [fileName, setFileName] = useState<string>('');
   const [sourceKind, setSourceKind] = useState<DocumentKind>('pdf');
+  const [activeDraftId, setActiveDraftId] = useState<string | null>(null);
   const [pdfDoc, setPdfDoc] = useState<PDFDocumentProxy | null>(null);
   const [pages, setPages] = useState<PDFPageProxy[]>([]);
   const [isLoadingPdf, setIsLoadingPdf] = useState(false);
@@ -63,6 +98,8 @@ export default function App() {
   const [errorMessage, setErrorMessage] = useState<string | null>(null);
 
   const [recentFiles, setRecentFiles] = useState<RecentFileEntry[]>([]);
+  const [drafts, setDrafts] = useState<DraftProject[]>([]);
+  const [draftSavedHint, setDraftSavedHint] = useState(false);
 
   const [activeTool, setActiveTool] = useState<ToolMode>('text');
   const [annotations, setAnnotations] = useState<PdfAnnotation[]>([]);
@@ -79,12 +116,106 @@ export default function App() {
   const [isDownloading, setIsDownloading] = useState(false);
   const [downloadSuccess, setDownloadSuccess] = useState(false);
 
+  // Always holds latest active editing state so exit/background handlers save immediately
+  const latestSessionRef = useRef<{
+    draftId: string | null;
+    pdfBytes: Uint8Array | null;
+    fileName: string;
+    sourceKind: DocumentKind;
+    annotations: PdfAnnotation[];
+    hasExistingDraft: boolean;
+  }>({
+    draftId: null,
+    pdfBytes: null,
+    fileName: '',
+    sourceKind: 'pdf',
+    annotations: [],
+    hasExistingDraft: false,
+  });
+
+  latestSessionRef.current = {
+    draftId: activeDraftId,
+    pdfBytes,
+    fileName,
+    sourceKind,
+    annotations,
+    hasExistingDraft: Boolean(
+      activeDraftId && drafts.some((d) => d.id === activeDraftId)
+    ),
+  };
+
   useEffect(() => {
     void loadRecentFiles().then(setRecentFiles);
+    void loadDrafts().then(setDrafts);
   }, []);
 
+  const persistCurrentDraftNow = useCallback(async () => {
+    const snap = latestSessionRef.current;
+    if (!snap.draftId || !snap.pdfBytes) return;
+
+    // Auto-save whenever there is at least 1 edit or an existing draft is being updated
+    if (snap.annotations.length === 0 && !snap.hasExistingDraft) return;
+
+    const updated = await saveDraft({
+      id: snap.draftId,
+      name: snap.fileName,
+      kind: snap.sourceKind,
+      pdfBytes: snap.pdfBytes,
+      annotations: snap.annotations,
+      updatedAt: Date.now(),
+    });
+    if (updated.length > 0) {
+      setDrafts(updated);
+      setDraftSavedHint(true);
+    }
+  }, []);
+
+  // Automatically save draft whenever annotations change (no Save button needed)
+  useEffect(() => {
+    if (!activeDraftId || !pdfBytes) return;
+    const hasExisting = drafts.some((d) => d.id === activeDraftId);
+    if (annotations.length === 0 && !hasExisting) {
+      setDraftSavedHint(false);
+      return;
+    }
+
+    const timer = window.setTimeout(() => {
+      void persistCurrentDraftNow();
+    }, 250);
+
+    return () => window.clearTimeout(timer);
+  }, [annotations, activeDraftId, pdfBytes, drafts, persistCurrentDraftNow]);
+
+  // Flush draft immediately if user closes tab, switches mobile apps, or navigates away
+  useEffect(() => {
+    const flushOnExit = () => {
+      void persistCurrentDraftNow();
+    };
+    const handleVisibilityChange = () => {
+      if (document.visibilityState === 'hidden') {
+        flushOnExit();
+      }
+    };
+
+    document.addEventListener('visibilitychange', handleVisibilityChange);
+    window.addEventListener('pagehide', flushOnExit);
+    window.addEventListener('beforeunload', flushOnExit);
+
+    return () => {
+      document.removeEventListener('visibilitychange', handleVisibilityChange);
+      window.removeEventListener('pagehide', flushOnExit);
+      window.removeEventListener('beforeunload', flushOnExit);
+    };
+  }, [persistCurrentDraftNow]);
+
   const loadPdfFromBytes = useCallback(
-    async (bytes: Uint8Array, name: string, kind: DocumentKind) => {
+    async (
+      bytes: Uint8Array,
+      name: string,
+      kind: DocumentKind,
+      initialAnnotations: PdfAnnotation[] = [],
+      existingDraftId?: string
+    ) => {
       setIsLoadingPdf(true);
       setErrorMessage(null);
       setDownloadSuccess(false);
@@ -103,9 +234,11 @@ export default function App() {
         setPdfBytes(bytes);
         setFileName(name);
         setSourceKind(kind);
+        setActiveDraftId(existingDraftId ?? createId());
         setPdfDoc(doc);
         setPages(loadedPages);
-        setAnnotations([]);
+        setAnnotations(initialAnnotations);
+        setDraftSavedHint(initialAnnotations.length > 0);
         setSelectedId(null);
         setFocusTextId(null);
         setActiveTool('text');
@@ -127,6 +260,9 @@ export default function App() {
 
   const openDocumentBytes = useCallback(
     async (rawBytes: Uint8Array, originalName: string, persistRecent = true) => {
+      // Save any in-progress draft before switching documents
+      await persistCurrentDraftNow();
+
       const kind = detectDocumentKind(originalName);
       setErrorMessage(null);
 
@@ -165,8 +301,27 @@ export default function App() {
       }
       await loadPdfFromBytes(rawBytes, originalName, 'pdf');
     },
-    [loadPdfFromBytes]
+    [loadPdfFromBytes, persistCurrentDraftNow]
   );
+
+  const handleOpenDraft = async (draft: DraftProject) => {
+    await loadPdfFromBytes(
+      new Uint8Array(draft.pdfBytes),
+      draft.name,
+      draft.kind,
+      draft.annotations,
+      draft.id
+    );
+  };
+
+  const handleDeleteDraft = async (
+    e: React.MouseEvent<HTMLButtonElement>,
+    draftId: string
+  ) => {
+    e.stopPropagation();
+    const updated = await deleteDraft(draftId);
+    setDrafts(updated);
+  };
 
   const handleFileSelected = async (e: React.ChangeEvent<HTMLInputElement>) => {
     const file = e.target.files?.[0];
@@ -215,13 +370,16 @@ export default function App() {
     fileInputRef.current?.click();
   };
 
-  const handleBackToFiles = () => {
+  const handleBackToFiles = async () => {
+    await persistCurrentDraftNow();
     setPdfDoc(null);
     setPages([]);
     setPdfBytes(null);
+    setActiveDraftId(null);
     setSelectedId(null);
     setFocusTextId(null);
     setAnnotations([]);
+    setDraftSavedHint(false);
   };
 
   const getMostVisiblePageIndex = (): number => {
@@ -411,7 +569,7 @@ export default function App() {
                 type="button"
                 onClick={handleBackToFiles}
                 className="min-h-[48px] min-w-[48px] rounded-xl bg-blue-50 border border-blue-200 text-blue-900 flex items-center justify-center hover:bg-blue-100 active:scale-95 transition-transform shrink-0"
-                aria-label="Back to file list"
+                aria-label="Back to drafts and files"
               >
                 <ArrowLeft className="w-5 h-5" />
               </button>
@@ -483,8 +641,8 @@ export default function App() {
 
       {/* Main Content */}
       {!pdfDoc ? (
-        <main className="flex-1 flex items-center justify-center px-4 py-6 md:py-10">
-          <div className="w-full max-w-5xl grid grid-cols-1 lg:grid-cols-2 gap-6 items-stretch">
+        <main className="flex-1 flex items-start md:items-center justify-center px-4 py-6 md:py-10">
+          <div className="w-full max-w-5xl grid grid-cols-1 lg:grid-cols-2 gap-6 items-start">
             {/* Primary Open File Card */}
             <section className="bg-white rounded-3xl border border-blue-200 shadow-sm p-6 sm:p-8 flex flex-col justify-between gap-6">
               <div className="space-y-4">
@@ -492,7 +650,7 @@ export default function App() {
                   Fill and sign PDF or Word files on your phone
                 </h1>
                 <p className="text-lg text-blue-900/80 leading-relaxed">
-                  Open a PDF or Word document, tap anywhere to type, add ticks, draw your signature, and save as a filled PDF.
+                  Open a PDF or Word document, tap anywhere to type, add ticks, draw your signature, and save as a filled PDF. All your edits save automatically in Drafts.
                 </p>
               </div>
 
@@ -522,83 +680,143 @@ export default function App() {
               </div>
             </section>
 
-            {/* File List Card (Shows both PDF and W icons, opens all inside app) */}
-            <section className="bg-white rounded-3xl border border-blue-200 shadow-sm p-6 sm:p-8 flex flex-col gap-4">
-              <div className="flex items-center justify-between gap-2">
-                <h2 className="text-2xl font-bold text-blue-950">Files</h2>
-                <span className="text-base font-semibold text-blue-700">
-                  Tap to open
-                </span>
-              </div>
+            {/* Right Column: Auto-Saved Drafts + File List */}
+            <div className="space-y-6">
+              {/* Auto-Saved Drafts Section */}
+              <section className="bg-white rounded-3xl border border-blue-200 shadow-sm p-6 flex flex-col gap-4">
+                <div className="flex items-center justify-between gap-2">
+                  <h2 className="text-2xl font-bold text-blue-950">Drafts</h2>
+                  <span className="text-base font-semibold text-blue-700">
+                    Saved automatically
+                  </span>
+                </div>
 
-              <div className="space-y-3">
-                {/* Recently opened PDF & Word files */}
-                {recentFiles.map((file) => (
-                  <button
-                    key={file.id}
-                    type="button"
-                    disabled={isBusy}
-                    onClick={() => handleOpenRecent(file)}
-                    className="w-full min-h-[68px] p-3 rounded-2xl bg-blue-50/70 border border-blue-200 hover:bg-blue-100/80 active:scale-[0.99] transition-all flex items-center gap-3.5 text-left"
-                  >
-                    <FileTypeIcon kind={file.kind} />
-                    <div className="flex-1 min-w-0">
-                      <p className="text-base font-bold text-blue-950 truncate">
-                        {file.name}
-                      </p>
-                      <p className="text-base text-blue-800">
-                        {file.kind === 'word'
-                          ? 'Word Document · Opens as PDF'
-                          : 'PDF Document'}
-                      </p>
-                    </div>
-                    <ChevronRight className="w-6 h-6 text-blue-600 shrink-0" />
-                  </button>
-                ))}
+                {drafts.length === 0 ? (
+                  <p className="text-base text-blue-900/75 py-2">
+                    Any PDF or Word project you start filling is saved here automatically so you can continue anytime.
+                  </p>
+                ) : (
+                  <div className="space-y-3">
+                    {drafts.map((draft) => {
+                      const editCount = draft.annotations.length;
+                      return (
+                        <div
+                          key={draft.id}
+                          onClick={() => !isBusy && void handleOpenDraft(draft)}
+                          role="button"
+                          tabIndex={0}
+                          onKeyDown={(e) => {
+                            if ((e.key === 'Enter' || e.key === ' ') && !isBusy) {
+                              e.preventDefault();
+                              void handleOpenDraft(draft);
+                            }
+                          }}
+                          className="w-full min-h-[72px] p-3 rounded-2xl bg-blue-50 border-2 border-blue-300 hover:bg-blue-100/80 active:scale-[0.99] transition-all flex items-center gap-3.5 text-left cursor-pointer"
+                        >
+                          <FileTypeIcon kind={draft.kind} />
+                          <div className="flex-1 min-w-0">
+                            <p className="text-base font-bold text-blue-950 truncate">
+                              {draft.name}
+                            </p>
+                            <p className="text-base text-blue-800">
+                              {editCount} {editCount === 1 ? 'item' : 'items'} ·{' '}
+                              {formatDraftTimestamp(draft.updatedAt)}
+                            </p>
+                          </div>
 
-                {/* Starter Sample PDF (PDF icon) */}
-                {!hasSamplePdfInRecent && (
-                  <button
-                    type="button"
-                    disabled={isBusy}
-                    onClick={handleLoadSamplePdf}
-                    className="w-full min-h-[68px] p-3 rounded-2xl bg-blue-50/70 border border-blue-200 hover:bg-blue-100/80 active:scale-[0.99] transition-all flex items-center gap-3.5 text-left"
-                  >
-                    <FileTypeIcon kind="pdf" />
-                    <div className="flex-1 min-w-0">
-                      <p className="text-base font-bold text-blue-950 truncate">
-                        Sample_Application_Form.pdf
-                      </p>
-                      <p className="text-base text-blue-800">
-                        PDF Form · Ready to fill
-                      </p>
-                    </div>
-                    <ChevronRight className="w-6 h-6 text-blue-600 shrink-0" />
-                  </button>
+                          <button
+                            type="button"
+                            onClick={(e) => void handleDeleteDraft(e, draft.id)}
+                            className="min-h-[48px] min-w-[48px] rounded-xl bg-white border border-blue-200 text-blue-800 flex items-center justify-center hover:bg-blue-50 active:scale-95 transition-transform shrink-0"
+                            aria-label={`Delete draft ${draft.name}`}
+                          >
+                            <Trash2 className="w-5 h-5" />
+                          </button>
+                        </div>
+                      );
+                    })}
+                  </div>
                 )}
+              </section>
 
-                {/* Starter Sample Word Doc (W icon) */}
-                {!hasSampleWordInRecent && (
-                  <button
-                    type="button"
-                    disabled={isBusy}
-                    onClick={handleLoadSampleWord}
-                    className="w-full min-h-[68px] p-3 rounded-2xl bg-blue-50/70 border border-blue-200 hover:bg-blue-100/80 active:scale-[0.99] transition-all flex items-center gap-3.5 text-left"
-                  >
-                    <FileTypeIcon kind="word" />
-                    <div className="flex-1 min-w-0">
-                      <p className="text-base font-bold text-blue-950 truncate">
-                        Sample_Word_Form.docx
-                      </p>
-                      <p className="text-base text-blue-800">
-                        Word Document · Converts to PDF
-                      </p>
-                    </div>
-                    <ChevronRight className="w-6 h-6 text-blue-600 shrink-0" />
-                  </button>
-                )}
-              </div>
-            </section>
+              {/* File List Card (Shows both PDF and W icons, opens all inside app) */}
+              <section className="bg-white rounded-3xl border border-blue-200 shadow-sm p-6 flex flex-col gap-4">
+                <div className="flex items-center justify-between gap-2">
+                  <h2 className="text-2xl font-bold text-blue-950">Files</h2>
+                  <span className="text-base font-semibold text-blue-700">
+                    Tap to open
+                  </span>
+                </div>
+
+                <div className="space-y-3">
+                  {/* Recently opened PDF & Word files */}
+                  {recentFiles.map((file) => (
+                    <button
+                      key={file.id}
+                      type="button"
+                      disabled={isBusy}
+                      onClick={() => handleOpenRecent(file)}
+                      className="w-full min-h-[68px] p-3 rounded-2xl bg-blue-50/70 border border-blue-200 hover:bg-blue-100/80 active:scale-[0.99] transition-all flex items-center gap-3.5 text-left"
+                    >
+                      <FileTypeIcon kind={file.kind} />
+                      <div className="flex-1 min-w-0">
+                        <p className="text-base font-bold text-blue-950 truncate">
+                          {file.name}
+                        </p>
+                        <p className="text-base text-blue-800">
+                          {file.kind === 'word'
+                            ? 'Word Document · Opens as PDF'
+                            : 'PDF Document'}
+                        </p>
+                      </div>
+                      <ChevronRight className="w-6 h-6 text-blue-600 shrink-0" />
+                    </button>
+                  ))}
+
+                  {/* Starter Sample PDF (PDF icon) */}
+                  {!hasSamplePdfInRecent && (
+                    <button
+                      type="button"
+                      disabled={isBusy}
+                      onClick={handleLoadSamplePdf}
+                      className="w-full min-h-[68px] p-3 rounded-2xl bg-blue-50/70 border border-blue-200 hover:bg-blue-100/80 active:scale-[0.99] transition-all flex items-center gap-3.5 text-left"
+                    >
+                      <FileTypeIcon kind="pdf" />
+                      <div className="flex-1 min-w-0">
+                        <p className="text-base font-bold text-blue-950 truncate">
+                          Sample_Application_Form.pdf
+                        </p>
+                        <p className="text-base text-blue-800">
+                          PDF Form · Ready to fill
+                        </p>
+                      </div>
+                      <ChevronRight className="w-6 h-6 text-blue-600 shrink-0" />
+                    </button>
+                  )}
+
+                  {/* Starter Sample Word Doc (W icon) */}
+                  {!hasSampleWordInRecent && (
+                    <button
+                      type="button"
+                      disabled={isBusy}
+                      onClick={handleLoadSampleWord}
+                      className="w-full min-h-[68px] p-3 rounded-2xl bg-blue-50/70 border border-blue-200 hover:bg-blue-100/80 active:scale-[0.99] transition-all flex items-center gap-3.5 text-left"
+                    >
+                      <FileTypeIcon kind="word" />
+                      <div className="flex-1 min-w-0">
+                        <p className="text-base font-bold text-blue-950 truncate">
+                          Sample_Word_Form.docx
+                        </p>
+                        <p className="text-base text-blue-800">
+                          Word Document · Converts to PDF
+                        </p>
+                      </div>
+                      <ChevronRight className="w-6 h-6 text-blue-600 shrink-0" />
+                    </button>
+                  )}
+                </div>
+              </section>
+            </div>
           </div>
         </main>
       ) : (
@@ -614,6 +832,7 @@ export default function App() {
                   {activeTool === 'tick'
                     ? 'Tap page to add a tick'
                     : 'Tap page to type text'}
+                  {draftSavedHint ? ' · Draft saved' : ''}
                 </p>
               </div>
             </div>
